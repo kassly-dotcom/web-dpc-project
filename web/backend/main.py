@@ -1,9 +1,15 @@
 from fastapi import FastAPI
 
+from .cycles import router as cycles_router
+from .problems import install_problem_handlers
+
 app = FastAPI(
     title="Dormitory Laundry API",
     version="0.1.0"
 )
+
+install_problem_handlers(app)
+app.include_router(cycles_router)
 
 
 @app.get("/")

@@ -208,7 +208,7 @@ python -m uvicorn web.backend.main:app --reload
 | О1.2. Схема бази даних | - | - |
 | О1.3. Контракт API | [web/openapi.yaml](web/openapi.yaml) (OpenAPI 3.1), налаштування лінтера [web/redocly.yaml](web/redocly.yaml) | `npx @redocly/cli@2.75.0 lint web/openapi.yaml --config web/redocly.yaml` – документ валідний, 0 попереджень. Для кожного запиту, що змінює стан, є приклади тіл у `examples`; усі помилки – Problem Details |
 | О1.4. Головна операція | - | - |
-| О1.5. Список із курсором | - | - |
+| О1.5. Список із курсором | `GET /v1/cycles` у [web/backend/cycles.py](web/backend/cycles.py), курсор – [web/backend/cursor.py](web/backend/cursor.py) | [web/tests/test_cycles_list.py](web/tests/test_cycles_list.py), [web/tests/test_cursor.py](web/tests/test_cursor.py) на PostgreSQL 17: усі сторінки без дублів і пропусків (зокрема за однакового `created_at`), вставка між сторінками не зсуває наступну, чужі цикли не видно, пошкоджений курсор – 400 |
 | О1.6. Система, перевірка живучості й журнал | - | - |
 | О1.7. Клієнт | - | - |
 
@@ -286,6 +286,38 @@ npx @redocly/cli@2.75.0 lint web/openapi.yaml --config web/redocly.yaml
 ```
 
 Правило `operation-4xx-response` вимкнено лише для `/health` ([web/.redocly.lint-ignore.yaml](web/.redocly.lint-ignore.yaml)): у перевірки живучості немає вхідних даних, які можна відхилити.
+
+##### О1.5. Список із курсором
+
+`GET /v1/cycles?limit=20&cursor=...` повертає лише цикли поточного користувача (`X-User-Id`).
+
+- Порядок повний: `created_at DESC, id DESC`. За однакового часу вирішує `id`, тому курсор містить обидва значення.
+- Наступна сторінка – рядки строго після пари з курсора: `(created_at, id) < (:t, :id)`. На відміну від `OFFSET`, нові записи під час гортання не зсувають сторінок.
+- Сервер вибирає `limit + 1` рядків: зайвий лише показує, що є наступна сторінка; курсор будується за останнім поверненим рядком.
+- `limit` від 1 до 50 (за замовчуванням 20), інакше – 422.
+- `next_cursor` – непрозорий рядок (base64url від JSON); на останній сторінці – `null`. Пошкоджений курсор – 400 `invalid_cursor`.
+- Індекс під запит: `(user_id, created_at DESC, id DESC)`.
+
+Відповідь:
+
+```json
+{"items": [{"id": "0b6f…", "status": "held", "created_at": "2026-11-18T18:05:00Z", "...": "..."}],
+ "next_cursor": "eyJ0IjoiMjAyNi0xMS0xN1QxNzowMDowMFoiLCJpIjoiN2QxYzJlMGEtM2I0Zi00ZTJkLThjNmItNWE5ZTBmMWQyYzNiIn0"}
+```
+
+Запуск тестів (потрібен Docker):
+
+```bash
+docker run -d --name laundry-test-db -e POSTGRES_USER=laundry -e POSTGRES_PASSWORD=laundry -e POSTGRES_DB=laundry_test -p 55432:5432 postgres:17
+```
+
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+psycopg://laundry:laundry@localhost:55432/laundry_test"
+python -m pytest web/tests -q
+```
+
+Без `TEST_DATABASE_URL` виконуються лише чисті тести курсора, тести з базою пропускаються.
+
 
 ### ЛР2. Конкуренція та повторення запитів
 
@@ -401,7 +433,7 @@ npx @redocly/cli@2.75.0 lint web/openapi.yaml --config web/redocly.yaml
 | Учасник | Реалізовані пункти й виконані досліди |
 |---|---|
 | Катерина Сорокіна | Підготовка проєкту, Web О1.1, О1.2 | - |
-| Єлизавета Щирова | Web О1.3 | - |
+| Єлизавета Щирова | Web О1.3, О1.5 | - |
 | Марія Коростильова | - | - |
 | Ангеліна Болібок | - | - |
 
