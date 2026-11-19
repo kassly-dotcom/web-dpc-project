@@ -1,0 +1,32 @@
+services:
+  postgres:
+    image: postgres:17.11
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: laundry_web
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d laundry_web"]
+      interval: 2s
+      retries: 30
+
+  migrate:
+    image: postgres:17.11
+    command: ["sh", "/migrate/migrate.sh"]
+    environment:
+      DATABASE_URL: postgresql://app:app@postgres:5432/laundry_web
+      MIGRATIONS_DIR: /migrations
+    volumes:
+      - "../configs/migrate:/migrate:ro"
+      - "./migrations:/migrations:ro"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  pgdata:
