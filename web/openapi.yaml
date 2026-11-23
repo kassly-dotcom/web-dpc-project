@@ -132,7 +132,7 @@ paths:
               description: Адреса створеного циклу
               schema:
                 type: string
-              example: /v1/cycles/0b6f6a52-5f1e-4c4a-9a51-1d7d2d3f8e10
+              example: /v1/cycles/42
             X-Request-ID:
               $ref: "#/components/headers/XRequestId"
           content:
@@ -185,7 +185,7 @@ paths:
                   summary: GET /v1/cycles?limit=2 — є наступна сторінка
                   value:
                     items:
-                      - id: 0b6f6a52-5f1e-4c4a-9a51-1d7d2d3f8e10
+                      - id: "42"
                         machine_id: "1"
                         program: standard_wash
                         duration_min: 60
@@ -197,7 +197,7 @@ paths:
                         expires_at: "2026-11-18T18:15:00Z"
                         started_at: null
                         finished_at: null
-                      - id: 7d1c2e0a-3b4f-4e2d-8c6b-5a9e0f1d2c3b
+                      - id: "41"
                         machine_id: "2"
                         program: standard_dry
                         duration_min: 45
@@ -209,12 +209,12 @@ paths:
                         expires_at: "2026-11-17T17:10:00Z"
                         started_at: "2026-11-17T17:03:00Z"
                         finished_at: "2026-11-17T17:48:00Z"
-                    next_cursor: eyJ0IjoiMjAyNi0xMS0xN1QxNzowMDowMFoiLCJpIjoiN2QxYzJlMGEtM2I0Zi00ZTJkLThjNmItNWE5ZTBmMWQyYzNiIn0
+                    next_cursor: eyJ0IjoiMjAyNi0xMS0xN1QxNzowMDowMFoiLCJpIjoiNDEifQ
                 lastPage:
                   summary: Остання сторінка — next_cursor дорівнює null
                   value:
                     items:
-                      - id: 2a3b4c5d-6e7f-4a1b-9c2d-3e4f5a6b7c8d
+                      - id: "40"
                         machine_id: "1"
                         program: standard_wash
                         duration_min: 60
@@ -253,7 +253,7 @@ paths:
             type: string
             minLength: 1
             maxLength: 64
-          example: 0b6f6a52-5f1e-4c4a-9a51-1d7d2d3f8e10
+          example: "42"
       responses:
         "200":
           description: Цикл
@@ -308,7 +308,7 @@ components:
         type: string
         minLength: 1
         maxLength: 512
-      example: eyJ0IjoiMjAyNi0xMS0xN1QxNzowMDowMFoiLCJpIjoiN2QxYzJlMGEtM2I0Zi00ZTJkLThjNmItNWE5ZTBmMWQyYzNiIn0
+      example: eyJ0IjoiMjAyNi0xMS0xN1QxNzowMDowMFoiLCJpIjoiNDEifQ
 
   schemas:
     Health:
@@ -482,7 +482,7 @@ components:
     CycleHeld:
       summary: Щойно створене бронювання
       value:
-        id: 0b6f6a52-5f1e-4c4a-9a51-1d7d2d3f8e10
+        id: "42"
         machine_id: "1"
         program: standard_wash
         duration_min: 60

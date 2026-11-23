@@ -30,14 +30,14 @@ INSERT INTO cycle (
     user_id, machine_id, program,
     duration_min, price_kopecks, expires_at
 )
-VALUES (1, 1, 'standard', 60, 5000,
+VALUES (1, 1, 'standard_wash', 60, 5000,
         now() + interval '10 minutes');
 
 INSERT INTO cycle (
     user_id, machine_id, program,
     duration_min, price_kopecks, expires_at
 )
-VALUES (2, 1, 'standard', 60, 5000,
+VALUES (2, 1, 'standard_wash', 60, 5000,
         now() + interval '10 minutes');
 
 ROLLBACK;
