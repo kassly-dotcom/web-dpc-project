@@ -1,18 +1,18 @@
 """О1.5. GET /v1/cycles на справжньому PostgreSQL.
 
-Потрібна порожня тестова база в TEST_DATABASE_URL, наприклад:
-  docker run -d --name laundry-test-db -e POSTGRES_USER=laundry -e POSTGRES_PASSWORD=laundry \
-      -e POSTGRES_DB=laundry_test -p 55432:5432 postgres:17
-  $env:TEST_DATABASE_URL = "postgresql+psycopg://laundry:laundry@localhost:55432/laundry_test"
+Потрібна база з О1.2 і змінна TEST_DATABASE_URL:
+  docker compose -f web/compose.yaml -p laundry-web up -d
+  $env:TEST_DATABASE_URL = "postgresql+psycopg://app:app@localhost:5434/laundry_web"
 Без змінної тести пропускаються.
 
-Тести самі створюють мінімальні таблиці users/machines/cycles у схемі o15_test.
-Після злиття О1.2 їх варто перевести на справжні міграції.
+Тести створюють окрему схему o15_test за міграціями з web/migrations/
+і додають власні тестові дані, тому робочі дані не змінюються.
 """
 
 import os
-import uuid
+import itertools
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -23,29 +23,14 @@ if TEST_DB:
     sep = "&" if "?" in TEST_DB else "?"
     os.environ["DATABASE_URL"] = f"{TEST_DB}{sep}options=-csearch_path%3Do15_test"
 
-SCHEMA = """
-DROP SCHEMA IF EXISTS o15_test CASCADE;
-CREATE SCHEMA o15_test;
-SET search_path TO o15_test;
-CREATE TABLE users (id bigint PRIMARY KEY, name text NOT NULL, role text NOT NULL);
-CREATE TABLE machines (id bigint PRIMARY KEY);
-CREATE TABLE cycles (
-    id uuid PRIMARY KEY,
-    user_id bigint NOT NULL REFERENCES users(id),
-    machine_id bigint NOT NULL REFERENCES machines(id),
-    program text NOT NULL,
-    duration_min integer NOT NULL,
-    status text NOT NULL,
-    version integer NOT NULL DEFAULT 1,
-    price_kopecks bigint NOT NULL,
-    created_at timestamptz NOT NULL,
-    expires_at timestamptz NOT NULL,
-    started_at timestamptz,
-    finished_at timestamptz
-);
-CREATE INDEX cycles_user_page ON cycles (user_id, created_at DESC, id DESC);
-INSERT INTO users VALUES (1, 'Olena', 'student'), (2, 'Taras', 'student');
-INSERT INTO machines VALUES (1), (2);
+MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
+# Схему беремо зі справжніх міграцій О1.2 (+ індекс О1.5), а не пишемо вручну.
+SCHEMA_FILES = ["001_create_schema.sql", "003_cycle_list_index.sql"]
+
+TEST_DATA = """
+INSERT INTO users (id, name, role) VALUES (1, 'Olena', 'student'), (2, 'Taras', 'student');
+INSERT INTO floor (id, limit_w) VALUES (1, 10000);
+INSERT INTO machine (id, floor_id, kind, power_w) VALUES (1, 1, 'washer', 2000);
 """
 
 T0 = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
@@ -56,7 +41,11 @@ def db():
     from web.backend.db import engine
 
     with engine.begin() as conn:
-        conn.exec_driver_sql(SCHEMA)
+        conn.exec_driver_sql("DROP SCHEMA IF EXISTS o15_test CASCADE; CREATE SCHEMA o15_test")
+        conn.exec_driver_sql("SET search_path TO o15_test")
+        for name in SCHEMA_FILES:
+            conn.exec_driver_sql((MIGRATIONS / name).read_text(encoding="utf-8"))
+        conn.exec_driver_sql(TEST_DATA)
     yield engine
 
 
@@ -69,16 +58,20 @@ def client(db):
     return TestClient(app)
 
 
-def add_cycle(engine, user_id: int, created_at: datetime, cycle_id: str | None = None) -> str:
-    cycle_id = cycle_id or str(uuid.uuid4())
+_ids = itertools.count(1000)
+
+
+def add_cycle(engine, user_id: int, created_at: datetime) -> str:
+    # id не зростає разом із часом: перевіряємо, що порядок саме за (created_at, id)
+    cycle_id = (next(_ids) * 7919) % 100003
     with engine.begin() as conn:
         conn.exec_driver_sql(
-            """INSERT INTO cycles (id, user_id, machine_id, program, duration_min, status,
+            """INSERT INTO cycle (id, user_id, machine_id, program, duration_min, status,
                                    price_kopecks, created_at, expires_at)
                VALUES (%(id)s, %(u)s, 1, 'standard_wash', 60, 'done', 5000, %(t)s, %(e)s)""",
             {"id": cycle_id, "u": user_id, "t": created_at, "e": created_at + timedelta(minutes=10)},
         )
-    return cycle_id
+    return str(cycle_id)
 
 
 def read_all(client, user="1", limit=2):
@@ -99,7 +92,7 @@ def read_all(client, user="1", limit=2):
 def expected_order(engine, user_id=1):
     with engine.connect() as conn:
         rows = conn.exec_driver_sql(
-            "SELECT id FROM cycles WHERE user_id = %(u)s ORDER BY created_at DESC, id DESC",
+            "SELECT id FROM cycle WHERE user_id = %(u)s ORDER BY created_at DESC, id DESC",
             {"u": user_id},
         ).all()
     return [str(r.id) for r in rows]
@@ -166,7 +159,7 @@ def test_corrupted_cursor_gives_400_problem(client, db, cursor):
 def test_cursor_with_wrong_id_type_gives_400(client, db):
     from web.backend.cursor import encode_cursor
 
-    bad = encode_cursor(T0, "not-a-uuid")
+    bad = encode_cursor(T0, "not-a-number")
     r = client.get("/v1/cycles", params={"cursor": bad}, headers={"X-User-Id": "1"})
     assert r.status_code == 400
     assert r.json()["code"] == "invalid_cursor"

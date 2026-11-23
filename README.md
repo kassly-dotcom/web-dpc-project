@@ -208,7 +208,7 @@ python -m uvicorn web.backend.main:app --reload
 | О1.2. Схема бази даних | [web/migrations/](web/migrations/), [web/compose.yaml](web/compose.yaml) | [SQL-тести](web/tests/check_schema.sql), перевірка обмежень БД та повторного запуску міграцій |
 | О1.3. Контракт API | [web/openapi.yaml](web/openapi.yaml), налаштування лінтера [web/redocly.yaml](web/redocly.yaml) | Перевірка лінтером Redocly CLI - помилок і попереджень немає. Є приклади запитів і відповідей, усі помилки описано як Problem Details |
 | О1.4. Головна операція | - | - |
-| О1.5. Список із курсором | `GET /v1/cycles` у [web/backend/cycles.py](web/backend/cycles.py), курсор – [web/backend/cursor.py](web/backend/cursor.py) | [web/tests/test_cycles_list.py](web/tests/test_cycles_list.py), [web/tests/test_cursor.py](web/tests/test_cursor.py) на PostgreSQL 17: усі сторінки без дублів і пропусків (зокрема за однакового `created_at`), вставка між сторінками не зсуває наступну, чужі цикли не видно, пошкоджений курсор – 400 |
+| О1.5. Список із курсором | [web/backend/cycles.py](web/backend/cycles.py), [web/backend/cursor.py](web/backend/cursor.py), [003_cycle_list_index.sql](web/migrations/003_cycle_list_index.sql) | [Тести](web/tests/test_cycles_list.py) на PostgreSQL 17: усі сторінки без дублів і пропусків, вставка між сторінками не зсуває наступну, пошкоджений курсор - 400 |
 | О1.6. Система, перевірка живучості й журнал | - | - |
 | О1.7. Клієнт | - | - |
 
@@ -329,37 +329,49 @@ npx @redocly/cli@2.75.0 lint web/openapi.yaml --config web/redocly.yaml
 ([.redocly.lint-ignore.yaml](web/.redocly.lint-ignore.yaml)),
 бо цей маршрут не має вхідних даних.
 
-##### О1.5. Список із курсором
+### О1.5. Список із курсором
 
-`GET /v1/cycles?limit=20&cursor=...` повертає лише цикли поточного користувача (`X-User-Id`).
+Реалізовано маршрут `GET /v1/cycles?limit=20&cursor=...`,
+який повертає цикли поточного користувача (`X-User-Id`).
 
-- Порядок повний: `created_at DESC, id DESC`. За однакового часу вирішує `id`, тому курсор містить обидва значення.
-- Наступна сторінка – рядки строго після пари з курсора: `(created_at, id) < (:t, :id)`. На відміну від `OFFSET`, нові записи під час гортання не зсувають сторінок.
-- Сервер вибирає `limit + 1` рядків: зайвий лише показує, що є наступна сторінка; курсор будується за останнім поверненим рядком.
-- `limit` від 1 до 50 (за замовчуванням 20), інакше – 422.
-- `next_cursor` – непрозорий рядок (base64url від JSON); на останній сторінці – `null`. Пошкоджений курсор – 400 `invalid_cursor`.
-- Індекс під запит: `(user_id, created_at DESC, id DESC)`.
+Файли:
+- [cycles.py](web/backend/cycles.py) - маршрут і SQL-запити;
+- [cursor.py](web/backend/cursor.py) - створення та перевірка курсора;
+- [003_cycle_list_index.sql](web/migrations/003_cycle_list_index.sql) - індекс для списку.
 
-Відповідь:
+Як працює:
+- сортування `created_at DESC, id DESC`, тому за однакового часу порядок визначає `id`;
+- наступна сторінка - рядки після пари з курсора: `(created_at, id) < (:t, :id)`;
+- сервер вибирає `limit + 1` рядків, щоб дізнатися, чи є наступна сторінка;
+- `limit` від 1 до 50 (за замовчуванням 20), інакше - 422;
+- `next_cursor` - непрозорий рядок (base64url від JSON), на останній сторінці - `null`;
+- пошкоджений курсор - 400 з кодом `invalid_cursor`;
+- для запиту створено індекс `(user_id, created_at DESC, id DESC)`.
 
-```json
-{"items": [{"id": "0b6f…", "status": "held", "created_at": "2026-11-18T18:05:00Z", "...": "..."}],
- "next_cursor": "eyJ0IjoiMjAyNi0xMS0xN1QxNzowMDowMFoiLCJpIjoiN2QxYzJlMGEtM2I0Zi00ZTJkLThjNmItNWE5ZTBmMWQyYzNiIn0"}
-```
+На відміну від `OFFSET`, нові записи під час гортання не зсувають сторінки.
 
-Запуск тестів (потрібен Docker):
+#### Перевірка
+
+Тести: [test_cycles_list.py](web/tests/test_cycles_list.py),
+[test_cursor.py](web/tests/test_cursor.py).
+
+Перевірено:
+- усі сторінки читаються без дублів і пропусків, зокрема за однакового `created_at`;
+- новий цикл між сторінками не зсуває наступну сторінку;
+- користувач бачить лише свої цикли;
+- пошкоджений курсор - 400, неправильний `limit` - 422, без користувача - 401.
+
+Тести з базою створюють окрему схему `o15_test` за міграціями з `web/migrations/`.
+Запуск (база з О1.2 має працювати):
 
 ```bash
-docker run -d --name laundry-test-db -e POSTGRES_USER=laundry -e POSTGRES_PASSWORD=laundry -e POSTGRES_DB=laundry_test -p 55432:5432 postgres:17
+docker compose -f web/compose.yaml -p laundry-web up -d
 ```
 
 ```powershell
-$env:TEST_DATABASE_URL = "postgresql+psycopg://laundry:laundry@localhost:55432/laundry_test"
+$env:TEST_DATABASE_URL = "postgresql+psycopg://app:app@localhost:5434/laundry_web"
 python -m pytest web/tests -q
 ```
-
-Без `TEST_DATABASE_URL` виконуються лише чисті тести курсора, тести з базою пропускаються.
-
 
 ### ЛР2. Конкуренція та повторення запитів
 

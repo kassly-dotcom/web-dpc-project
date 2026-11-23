@@ -3,7 +3,7 @@
 Порядок повний: created_at DESC, id DESC. Наступна сторінка — рядки строго ПІСЛЯ
 пари (created_at, id) з курсора (порівняння пар у SQL). Вибираємо limit + 1 рядків:
 зайвий лише показує, що є наступна сторінка; курсор будуємо за ОСТАННІМ ПОВЕРНЕНИМ.
-Індекс під цей запит: (user_id, created_at DESC, id DESC) — див. О1.2.
+Індекс під цей запит: (user_id, created_at DESC, id DESC) — міграція 003_cycle_list_index.sql.
 """
 
 from datetime import datetime
@@ -28,7 +28,7 @@ _COLUMNS = """id, machine_id, program, duration_min, status, version, price_kope
 
 FIRST_PAGE_SQL = f"""
     SELECT {_COLUMNS}
-    FROM cycles
+    FROM cycle
     WHERE user_id = %(user_id)s
     ORDER BY created_at DESC, id DESC
     LIMIT %(fetch)s
@@ -36,7 +36,7 @@ FIRST_PAGE_SQL = f"""
 
 NEXT_PAGE_SQL = f"""
     SELECT {_COLUMNS}
-    FROM cycles
+    FROM cycle
     WHERE user_id = %(user_id)s
       AND (created_at, id) < (%(after_t)s, %(after_id)s)
     ORDER BY created_at DESC, id DESC
