@@ -205,8 +205,8 @@ python -m uvicorn web.backend.main:app --reload
 | Пункт | Де реалізовано | Перевірка та свідчення |
 |---|---|---|
 | О1.1. Модель предметної області | [Детальна модель](docs/web/domain-model.md), опис у README | Описано сутності, стани, дозволені переходи, інваріанти та числові навчальні припущення |
-| О1.2. Схема бази даних | - | - |
-| О1.3. Контракт API | [web/openapi.yaml](web/openapi.yaml) (OpenAPI 3.1), налаштування лінтера [web/redocly.yaml](web/redocly.yaml) | `npx @redocly/cli@2.75.0 lint web/openapi.yaml --config web/redocly.yaml` – документ валідний, 0 попереджень. Для кожного запиту, що змінює стан, є приклади тіл у `examples`; усі помилки – Problem Details |
+| О1.2. Схема бази даних | [web/migrations/](web/migrations/), [web/compose.yaml](web/compose.yaml) | [SQL-тести](web/tests/check_schema.sql), перевірка обмежень БД та повторного запуску міграцій |
+| О1.3. Контракт API | [web/openapi.yaml](web/openapi.yaml), налаштування лінтера [web/redocly.yaml](web/redocly.yaml) | Перевірка лінтером Redocly CLI - помилок і попереджень немає. Є приклади запитів і відповідей, усі помилки описано як Problem Details |
 | О1.4. Головна операція | - | - |
 | О1.5. Список із курсором | `GET /v1/cycles` у [web/backend/cycles.py](web/backend/cycles.py), курсор – [web/backend/cursor.py](web/backend/cursor.py) | [web/tests/test_cycles_list.py](web/tests/test_cycles_list.py), [web/tests/test_cursor.py](web/tests/test_cursor.py) на PostgreSQL 17: усі сторінки без дублів і пропусків (зокрема за однакового `created_at`), вставка між сторінками не зсуває наступну, чужі цикли не видно, пошкоджений курсор – 400 |
 | О1.6. Система, перевірка живучості й журнал | - | - |
@@ -259,33 +259,75 @@ stateDiagram-v2
 
 Детальна модель, атрибути сутностей, ER-діаграма та правила переходів: [docs/web/domain-model.md](docs/web/domain-model.md).
 
+### O1.2. Схема бази даних та міграції
 
-##### О1.3. Контракт API
+Для зберігання даних використано PostgreSQL 17.
 
-Контракт написано першим (contract-first) у [web/openapi.yaml](web/openapi.yaml); сервер і клієнт реалізують саме його.
+Створено таблиці:
+- `users` - користувачі;
+- `floor` - поверхи та ліміти потужності;
+- `machine` - пральні та сушильні машини;
+- `cycle` - цикли бронювання та прання.
 
-| Маршрут | Призначення | Відповіді |
-|---|---|---|
-| `GET /health` | Живучість екземпляра | 200 |
-| `GET /v1/machines` | Машини поверху зі станом | 200, 401 |
-| `POST /v1/cycles` | Головна операція – бронювання машини (цикл `held` на 10 хв) | 201 + `Location`, 400, 401, 404, 409, 422 |
-| `GET /v1/cycles` | Мої цикли від найновіших, курсорна пагінація (О1.5) | 200, 400, 401, 422 |
-| `GET /v1/cycles/{cycle_id}` | Один цикл (чужий – як неіснуючий) | 200, 401, 404 |
+Реалізовано версійні міграції:
+- [001_create_schema.sql](web/migrations/001_create_schema.sql) - створення схеми БД;
+- [002_seed_data.sql](web/migrations/002_seed_data.sql) - початкові дані.
 
-Домовленості:
-- користувач до ЛР3 – заголовок `X-User-Id`, у тілі `user_id` не передається;
-- ідентифікатори в JSON – рядки, гроші – `price_kopecks` + `currency`, час – RFC 3339 в UTC;
-- у запитах зайві поля заборонено (`additionalProperties: false`), у відповідях сервер може додавати поля, клієнт ігнорує невідомі;
-- помилки – Problem Details (RFC 9457, `application/problem+json`) з машинним `code`, `request_id` і переліком полів `errors` для 422;
-- кожна відповідь має `X-Request-ID`.
+Цілісність даних забезпечено обмеженнями PRIMARY KEY,
+FOREIGN KEY, NOT NULL, CHECK та унікальним частковим індексом.
 
-Перевірка лінтером (потрібен Node.js):
+Грошові суми зберігаються в копійках (UAH), потужність - у ватах,
+тривалість циклу - у хвилинах.
+Для часових позначок використано `timestamptz`,
+часовий пояс зберігається окремо.
+
+#### Запуск бази даних
+
+```bash
+docker compose -f web/compose.yaml -p laundry-web up -d
+```
+
+#### Перевірка
+
+Перевірено обмеження бази даних та повторний запуск міграцій.
+
+SQL-тести: [check_schema.sql](web/tests/check_schema.sql).
+
+### О1.3. Контракт API
+
+Контракт API описано у форматі OpenAPI 3.1 у файлі [web/openapi.yaml](web/openapi.yaml).
+Спочатку описано контракт, а сервер і клієнт реалізуються за ним.
+
+Описано маршрути:
+- `GET /health` - перевірка живучості сервера;
+- `GET /v1/machines` - список машин поверху та їхній стан;
+- `POST /v1/cycles` - бронювання машини, створюється цикл у стані `held` на 10 хв;
+- `GET /v1/cycles` - список циклів користувача з курсорною пагінацією (О1.5);
+- `GET /v1/cycles/{cycle_id}` - перегляд одного циклу.
+
+Для кожного маршруту додано приклади запитів і відповідей.
+Помилки описано у форматі Problem Details (RFC 9457, `application/problem+json`):
+400, 401, 404, 409 і 422. Кожна помилка має машинний код `code`, а для 422 -
+перелік полів з помилками `errors`.
+
+Домовленості контракту:
+- до ЛР3 користувача визначає заголовок `X-User-Id`;
+- ідентифікатори в JSON передаються рядками;
+- гроші - `price_kopecks` і `currency` (UAH), час - у UTC;
+- у запитах зайві поля заборонені, у відповідях клієнт ігнорує невідомі поля.
+
+#### Перевірка
+
+Контракт перевірено лінтером Redocly CLI (потрібен Node.js):
 
 ```bash
 npx @redocly/cli@2.75.0 lint web/openapi.yaml --config web/redocly.yaml
 ```
 
-Правило `operation-4xx-response` вимкнено лише для `/health` ([web/.redocly.lint-ignore.yaml](web/.redocly.lint-ignore.yaml)): у перевірки живучості немає вхідних даних, які можна відхилити.
+Результат: документ валідний, помилок і попереджень немає.
+Правило про 4xx-відповіді вимкнено лише для `/health`
+([.redocly.lint-ignore.yaml](web/.redocly.lint-ignore.yaml)),
+бо цей маршрут не має вхідних даних.
 
 ##### О1.5. Список із курсором
 
