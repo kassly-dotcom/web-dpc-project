@@ -1,0 +1,15 @@
+# Налаштування лінтера контракту (О1.3).
+# Запуск із кореня: npx @redocly/cli@2.75.0 lint web/openapi.yaml --config web/redocly.yaml
+extends:
+  - recommended
+rules:
+  # Навчальний проєкт запускається лише локально (uvicorn / nginx у docker compose).
+  no-server-example.com: off
+  # /health — перевірка живучості без вхідних даних і без входу: їй нема чого відхиляти з 4xx.
+  # Тому правило суворе для всіх інших операцій, а /health винесено в web/.redocly.lint-ignore.yaml.
+  operation-4xx-response:
+    severity: error
+  # Додатково вимагаємо від кожної операції operationId і хоча б одну 2xx-відповідь.
+  operation-operationId: error
+  operation-2xx-response: error
+  operation-4xx-problem-details-rfc7807: error

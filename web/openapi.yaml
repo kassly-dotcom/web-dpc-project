@@ -1,0 +1,628 @@
+# О1.3. Контракт API Web-частини (ЛР1) — «Пральня гуртожитку» (C27).
+# Підхід contract-first: спочатку цей документ, потім сервер (web/backend) і клієнт.
+# Перевірка лінтером: npx @redocly/cli@2.75.0 lint web/openapi.yaml
+openapi: 3.1.0
+info:
+  title: Dormitory Laundry — Web API
+  version: 1.0.0
+  license:
+    name: MIT
+    identifier: MIT
+  description: |
+    Контракт Web-частини системи бронювання пральних і сушильних машин.
+
+    **Користувач.** До ЛР3 особа визначається заголовком `X-User-Id`, що містить
+    ідентифікатор заздалегідь створеного користувача. Тіло запиту ніколи не містить
+    `user_id`: особа береться лише з контексту запиту.
+
+    **Ідентифікатори** в JSON завжди передаються рядками.
+
+    **Гроші** — цілі числа мінімальних одиниць (копійки) разом із кодом валюти.
+
+    **Час** — рядки RFC 3339 в UTC (`2026-11-18T18:05:00Z`).
+
+    **Сумісність.** У запитах зайві поля заборонено (`additionalProperties: false`),
+    у відповідях сервер може додавати нові поля — клієнт мусить ігнорувати невідомі.
+
+    **Помилки** — Problem Details (RFC 9457), тип `application/problem+json`.
+    Клієнт приймає рішення за `status` і `code`, а не за текстом `detail`.
+
+    **Журнал.** Кожна відповідь містить заголовок `X-Request-ID`.
+servers:
+  - url: http://localhost:8000
+    description: Локальний запуск (uvicorn або nginx із docker compose)
+security:
+  - userId: []
+tags:
+  - name: service
+    description: Службові маршрути
+  - name: machines
+    description: Машини поверху
+  - name: cycles
+    description: Цикли (бронювання й виконання)
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Перевірка живучості екземпляра
+      description: Відповідає на кожному екземплярі (app-a, app-b) без звернення до предметної логіки.
+      tags: [service]
+      security: []
+      responses:
+        "200":
+          description: Процес працює
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+              examples:
+                ok:
+                  value:
+                    status: ok
+                    instance: app-a
+
+  /v1/machines:
+    get:
+      operationId: listMachines
+      summary: Машини поверху з поточним станом
+      tags: [machines]
+      responses:
+        "200":
+          description: Перелік машин (невеликий, без пагінації)
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MachineList"
+              examples:
+                twoMachines:
+                  value:
+                    items:
+                      - id: "1"
+                        floor_id: "1"
+                        kind: washer
+                        power_w: 2000
+                        status: available
+                      - id: "2"
+                        floor_id: "1"
+                        kind: dryer
+                        power_w: 2000
+                        status: reserved
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/cycles:
+    post:
+      operationId: createCycle
+      summary: Забронювати машину (головна операція ЛР1)
+      description: |
+        Створює цикл у стані `held` на 10 хвилин. Перевірка стану машини і запис циклу
+        виконуються в одній транзакції; відповідь надсилається лише після фіксації.
+
+        Інваріант: машина має не більше одного активного циклу (`held` або `running`).
+      tags: [cycles]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CycleCreate"
+            examples:
+              wash:
+                summary: Стандартне прання на машині 1
+                value:
+                  machine_id: "1"
+                  program: standard_wash
+              dry:
+                summary: Стандартне сушіння на машині 2
+                value:
+                  machine_id: "2"
+                  program: standard_dry
+      responses:
+        "201":
+          description: Бронювання створено й зафіксовано
+          headers:
+            Location:
+              description: Адреса створеного циклу
+              schema:
+                type: string
+              example: /v1/cycles/42
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Cycle"
+              examples:
+                held:
+                  $ref: "#/components/examples/CycleHeld"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/MachineNotFound"
+        "409":
+          $ref: "#/components/responses/MachineBusy"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+    get:
+      operationId: listCycles
+      summary: Мої цикли від найновіших (курсорна пагінація)
+      description: |
+        Повертає лише цикли поточного користувача (`X-User-Id`) у порядку
+        `created_at DESC, id DESC`. Порядок повний: за однакового часу вирішує `id`.
+
+        Щоб прочитати всі сторінки, клієнт передає отриманий `next_cursor` у параметр
+        `cursor` наступного запиту з тим самим `limit`, доки `next_cursor` не стане `null`.
+        Курсор непрозорий: клієнт не розбирає й не складає його сам.
+
+        Список «живий», а не знімок: нові записи, створені під час гортання, не
+        зсувають наступних сторінок, тож рядки не дублюються й не пропускаються.
+      tags: [cycles]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Сторінка списку
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CyclePage"
+              examples:
+                firstPage:
+                  summary: GET /v1/cycles?limit=2 — є наступна сторінка
+                  value:
+                    items:
+                      - id: "42"
+                        machine_id: "1"
+                        program: standard_wash
+                        duration_min: 60
+                        status: held
+                        version: 1
+                        price_kopecks: 5000
+                        currency: UAH
+                        created_at: "2026-11-18T18:05:00Z"
+                        expires_at: "2026-11-18T18:15:00Z"
+                        started_at: null
+                        finished_at: null
+                      - id: "41"
+                        machine_id: "2"
+                        program: standard_dry
+                        duration_min: 45
+                        status: done
+                        version: 3
+                        price_kopecks: 4000
+                        currency: UAH
+                        created_at: "2026-11-17T17:00:00Z"
+                        expires_at: "2026-11-17T17:10:00Z"
+                        started_at: "2026-11-17T17:03:00Z"
+                        finished_at: "2026-11-17T17:48:00Z"
+                    next_cursor: eyJ0IjoiMjAyNi0xMS0xN1QxNzowMDowMFoiLCJpIjoiNDEifQ
+                lastPage:
+                  summary: Остання сторінка — next_cursor дорівнює null
+                  value:
+                    items:
+                      - id: "40"
+                        machine_id: "1"
+                        program: standard_wash
+                        duration_min: 60
+                        status: cancelled
+                        version: 2
+                        price_kopecks: 5000
+                        currency: UAH
+                        created_at: "2026-11-16T09:00:00Z"
+                        expires_at: "2026-11-16T09:10:00Z"
+                        started_at: null
+                        finished_at: null
+                    next_cursor: null
+                empty:
+                  summary: У користувача ще немає циклів
+                  value:
+                    items: []
+                    next_cursor: null
+        "400":
+          $ref: "#/components/responses/BadCursor"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /v1/cycles/{cycle_id}:
+    get:
+      operationId: getCycle
+      summary: Стан одного циклу
+      description: Чужий цикл відповідає так само, як неіснуючий (404), щоб не розкривати чужих даних.
+      tags: [cycles]
+      parameters:
+        - name: cycle_id
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+          example: "42"
+      responses:
+        "200":
+          description: Цикл
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Cycle"
+              examples:
+                held:
+                  $ref: "#/components/examples/CycleHeld"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/CycleNotFound"
+
+components:
+  securitySchemes:
+    userId:
+      type: apiKey
+      in: header
+      name: X-User-Id
+      description: Ідентифікатор заздалегідь створеного користувача (до ЛР3, далі — справжній вхід).
+
+  headers:
+    XRequestId:
+      description: Ідентифікатор запиту; той самий, що в рядку журналу сервера.
+      schema:
+        type: string
+      example: 3f9d6c2e-1a4b-4c8d-9e0f-7a6b5c4d3e2f
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Розмір сторінки, від 1 до 50.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 50
+        default: 20
+      example: 20
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Непрозорий курсор із поля `next_cursor` попередньої сторінки. Для першої сторінки не передається.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 512
+      example: eyJ0IjoiMjAyNi0xMS0xN1QxNzowMDowMFoiLCJpIjoiNDEifQ
+
+  schemas:
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: ok
+        instance:
+          type: string
+          description: Назва екземпляра (app-a / app-b)
+
+    MachineKind:
+      type: string
+      enum: [washer, dryer]
+
+    MachineStatus:
+      type: string
+      enum: [available, reserved, running, out_of_service]
+
+    Machine:
+      type: object
+      required: [id, floor_id, kind, power_w, status]
+      properties:
+        id:
+          type: string
+        floor_id:
+          type: string
+        kind:
+          $ref: "#/components/schemas/MachineKind"
+        power_w:
+          type: integer
+          minimum: 1
+          description: Номінальна потужність, Вт
+        status:
+          $ref: "#/components/schemas/MachineStatus"
+
+    MachineList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Machine"
+
+    Program:
+      type: string
+      enum: [standard_wash, standard_dry]
+      description: |
+        Програма циклу (навчальні припущення):
+        `standard_wash` — 2000 Вт, 60 хв, 5000 коп.;
+        `standard_dry` — 2000 Вт, 45 хв, 4000 коп.
+
+    CycleStatus:
+      type: string
+      enum: [held, running, done, expired, cancelled]
+
+    CycleCreate:
+      type: object
+      additionalProperties: false
+      required: [machine_id, program]
+      properties:
+        machine_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+        program:
+          $ref: "#/components/schemas/Program"
+
+    Cycle:
+      type: object
+      required:
+        - id
+        - machine_id
+        - program
+        - duration_min
+        - status
+        - version
+        - price_kopecks
+        - currency
+        - created_at
+        - expires_at
+        - started_at
+        - finished_at
+      properties:
+        id:
+          type: string
+        machine_id:
+          type: string
+        program:
+          $ref: "#/components/schemas/Program"
+        duration_min:
+          type: integer
+          minimum: 1
+        status:
+          $ref: "#/components/schemas/CycleStatus"
+        version:
+          type: integer
+          minimum: 1
+          description: Версія запису для контролю конкурентних змін
+        price_kopecks:
+          type: integer
+          minimum: 1
+          description: Вартість у мінімальних одиницях валюти
+        currency:
+          type: string
+          const: UAH
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          description: created_at + 10 хв
+        started_at:
+          type: [string, "null"]
+          format: date-time
+        finished_at:
+          type: [string, "null"]
+          format: date-time
+
+    CyclePage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/Cycle"
+        next_cursor:
+          type: [string, "null"]
+          description: Курсор наступної сторінки або `null`, якщо сторінка остання.
+
+    Problem:
+      type: object
+      description: Problem Details (RFC 9457) з розширеннями `code`, `request_id`, `errors`.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        code:
+          type: string
+          description: Машинний код помилки, за яким клієнт приймає рішення
+        request_id:
+          type: string
+        errors:
+          type: array
+          description: Усі порушені поля (для 422)
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+
+  examples:
+    CycleHeld:
+      summary: Щойно створене бронювання
+      value:
+        id: "42"
+        machine_id: "1"
+        program: standard_wash
+        duration_min: 60
+        status: held
+        version: 1
+        price_kopecks: 5000
+        currency: UAH
+        created_at: "2026-11-18T18:05:00Z"
+        expires_at: "2026-11-18T18:15:00Z"
+        started_at: null
+        finished_at: null
+
+  responses:
+    BadRequest:
+      description: Тіло не є коректним JSON; нічого не змінено
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            malformedJson:
+              value:
+                type: https://laundry.example.test/problems/malformed-json
+                title: Malformed JSON
+                status: 400
+                detail: "Expecting ',' delimiter: line 1 column 22"
+                code: malformed_json
+                request_id: 3f9d6c2e-1a4b-4c8d-9e0f-7a6b5c4d3e2f
+    BadCursor:
+      description: Курсор пошкоджено або підроблено; нічого не прочитано
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            invalidCursor:
+              value:
+                type: https://laundry.example.test/problems/invalid-cursor
+                title: Invalid cursor
+                status: 400
+                detail: Cursor is malformed; start again without cursor
+                code: invalid_cursor
+                request_id: 3f9d6c2e-1a4b-4c8d-9e0f-7a6b5c4d3e2f
+    Unauthorized:
+      description: Немає або невідомий `X-User-Id`
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            missingUser:
+              value:
+                type: https://laundry.example.test/problems/unauthorized
+                title: Unauthorized
+                status: 401
+                detail: Header X-User-Id is required
+                code: unauthorized
+                request_id: 3f9d6c2e-1a4b-4c8d-9e0f-7a6b5c4d3e2f
+    ValidationError:
+      description: Дані не відповідають схемі; нічого не змінено
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            invalidFields:
+              value:
+                type: https://laundry.example.test/problems/validation-error
+                title: Validation error
+                status: 422
+                detail: 2 fields are invalid
+                code: validation_error
+                request_id: 3f9d6c2e-1a4b-4c8d-9e0f-7a6b5c4d3e2f
+                errors:
+                  - field: body.program
+                    message: "Input should be 'standard_wash' or 'standard_dry'"
+                  - field: body.user_id
+                    message: Extra inputs are not permitted
+            limitOutOfRange:
+              value:
+                type: https://laundry.example.test/problems/validation-error
+                title: Validation error
+                status: 422
+                detail: 1 field is invalid
+                code: validation_error
+                request_id: 3f9d6c2e-1a4b-4c8d-9e0f-7a6b5c4d3e2f
+                errors:
+                  - field: query.limit
+                    message: Input should be less than or equal to 50
+    MachineNotFound:
+      description: Машини з таким `machine_id` немає
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            machineNotFound:
+              value:
+                type: https://laundry.example.test/problems/machine-not-found
+                title: Machine not found
+                status: 404
+                detail: Machine 99 does not exist
+                code: machine_not_found
+                request_id: 3f9d6c2e-1a4b-4c8d-9e0f-7a6b5c4d3e2f
+    CycleNotFound:
+      description: Циклу немає або він належить іншому користувачу
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            cycleNotFound:
+              value:
+                type: https://laundry.example.test/problems/cycle-not-found
+                title: Cycle not found
+                status: 404
+                code: cycle_not_found
+                request_id: 3f9d6c2e-1a4b-4c8d-9e0f-7a6b5c4d3e2f
+    MachineBusy:
+      description: Машина недоступна (ресурсу не вистачає); нового бронювання немає
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            machineBusy:
+              summary: Машина вже має активний цикл
+              value:
+                type: https://laundry.example.test/problems/machine-busy
+                title: Machine is busy
+                status: 409
+                detail: Machine 1 already has an active cycle
+                code: machine_busy
+                request_id: 3f9d6c2e-1a4b-4c8d-9e0f-7a6b5c4d3e2f
+            outOfService:
+              summary: Машину виведено з експлуатації
+              value:
+                type: https://laundry.example.test/problems/machine-out-of-service
+                title: Machine is out of service
+                status: 409
+                detail: Machine 3 is out of service
+                code: machine_out_of_service
+                request_id: 3f9d6c2e-1a4b-4c8d-9e0f-7a6b5c4d3e2f
